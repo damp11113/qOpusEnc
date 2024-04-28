@@ -1,0 +1,17 @@
+{
+    "version": 4,
+    "framesizes": 60,
+    "app": "audio",
+    "bitmode": "CVBR",
+    "bitrates": 64.0,
+    "bandwidth": "fullband",
+    "channels": 2,
+    "packloss": 0,
+    "compressions": 10,
+    "samplesrates": 48000,
+    "ai": false,
+    "prediction": true,
+    "phaseinvert": true,
+    "DTX": false,
+    "gain": 1
+}
