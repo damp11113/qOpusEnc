@@ -218,7 +218,7 @@ class AboutDialog(QDialog):
         self.lbl_name.setStyleSheet("font-weight: bold; font-size: 14pt;")
         self.lbl_version = QLabel("Version: 1.5")
         self.lbl_author = QLabel("damp11113")
-        self.lbl_website = QLabel('<a href="https://www.pazera-software.com/products/audio-extractor/">https://dpsoftware.damp11113.xyz/qopusenc</a>')
+        self.lbl_website = QLabel('<a href="https://dpsoftware.damp11113.xyz/qopusenc">https://dpsoftware.damp11113.xyz/qopusenc</a>')
         self.lbl_website.setOpenExternalLinks(True)
 
         layout.addWidget(self.lbl_name)
