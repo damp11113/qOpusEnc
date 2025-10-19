@@ -1,0 +1,20 @@
+{
+    "version": 1,
+    "framesizes": 120,
+    "app": "audio",
+    "bitmode": "VBR",
+    "bitrates": 128.0,
+    "bandwidth": "fullband",
+    "channels": 2,
+    "packloss": 0,
+    "compressions": 10,
+    "samplesrates": 48000,
+    "ai": true,
+    "prediction": true,
+    "phaseinvert": true,
+    "DTX": false,
+    "gain": 1,
+    "absthreshold": -50.0,
+    "amthreshold": -30.0,
+    "automono": true
+}

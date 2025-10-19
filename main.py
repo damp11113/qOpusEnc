@@ -1,3 +1,5 @@
+import math
+
 from PyQt5.QtWidgets import QApplication, QMainWindow, QAbstractItemView, QTableWidgetItem, \
     QFileDialog, QMenu, QAction, QDialog, QPushButton, QVBoxLayout, QLabel
 from PyQt5.QtCore import Qt, pyqtSignal, QObject, QThread
@@ -30,6 +32,12 @@ class opusconfigstorer:
         self.phaseinvert = True
         self.DTX = False
         self.gain = 1
+        self.absthreshold = -75
+        self.amthreshold = -50
+        self.automono = False
+        self.dabs = False
+        self.absavg = False
+        self.oldcodebook = False
 
     def save(self, name):
         settings = {
@@ -47,7 +55,13 @@ class opusconfigstorer:
             'prediction': self.prediction,
             'phaseinvert': self.phaseinvert,
             'DTX': self.DTX,
-            "gain": self.gain
+            "gain": self.gain,
+            "absthreshold": self.absthreshold,
+            "amthreshold": self.amthreshold,
+            "automono": self.automono,
+            "dabs": self.dabs,
+            "absavg": self.absavg,
+            "oldcodebook": self.oldcodebook
         }
 
         with open(f"./presets/{name}.json", 'w') as jsonfile:
@@ -160,7 +174,7 @@ class opusconfigstorer:
             ui.GainIn.setValue(self.gain)
             # set enable ai
             self.ai = settings.get('ai', self.ai)
-            ui.EnaAI.setChecked(self.ai)
+            ui.EnaABS.setChecked(self.ai)
             # set enable prediction
             self.prediction = settings.get('prediction', self.prediction)
             ui.EnaPred.setChecked(self.prediction)
@@ -170,6 +184,26 @@ class opusconfigstorer:
             # set enable DTX
             self.DTX = settings.get('DTX', self.DTX)
             ui.EnaDTX.setChecked(self.DTX)
+
+            # set abs threshold
+            self.absthreshold = settings.get('absthreshold', self.absthreshold)
+            ui.ABSTIn.setValue(self.absthreshold)
+            # set am threshold
+            self.amthreshold = settings.get('amthreshold', self.amthreshold)
+            ui.AMTIn.setValue(self.amthreshold)
+
+            self.automono = settings.get('automono', self.automono)
+            ui.EnaAM.setChecked(self.automono)
+
+            self.dabs = settings.get('dabs', self.dabs)
+            ui.EnaDABS.setChecked(self.dabs)
+
+            self.absavg = settings.get('absavg', self.absavg)
+            ui.EnaABSAvg.setChecked(self.absavg)
+
+            self.oldcodebook = settings.get('oldcodebook', self.oldcodebook)
+            ui.EnaABSOCB.setChecked(self.oldcodebook)
+
 
     def getopusstrversion(self):
         if self.version == 1:
@@ -196,10 +230,6 @@ class opusconfigstorer:
         opusencoder.set_frame_size(self.framesizes)
         opusencoder.set_packets_loss(self.packloss)
 
-        # enable ai
-        #if self.version == 1:
-        #    opusencoder.CTL(pyogg.opus.OPUS_SET_DRED_DURATION_REQUEST, int(self.ai))
-
         opusencoder.CTL(pyogg.opus.OPUS_SET_PREDICTION_DISABLED_REQUEST, int(self.prediction))
         opusencoder.CTL(pyogg.opus.OPUS_SET_PHASE_INVERSION_DISABLED_REQUEST, int(self.phaseinvert))
         opusencoder.CTL(pyogg.opus.OPUS_SET_DTX_REQUEST, int(self.DTX))
@@ -218,7 +248,7 @@ class AboutDialog(QDialog):
         self.lbl_name.setStyleSheet("font-weight: bold; font-size: 14pt;")
         self.lbl_version = QLabel("Version: 1.5")
         self.lbl_author = QLabel("damp11113")
-        self.lbl_website = QLabel('<a href="https://www.pazera-software.com/products/audio-extractor/">https://dpsoftware.damp11113.xyz/qopusenc</a>')
+        self.lbl_website = QLabel('<a href="https://dpsoftware.damp11113.xyz/qopusenc">https://dpsoftware.damp11113.xyz/qopusenc</a>')
         self.lbl_website.setOpenExternalLinks(True)
 
         layout.addWidget(self.lbl_name)
@@ -334,6 +364,21 @@ class appconfigstore:
             else:
                 ui.EREN.setChecked(True)
 
+def make_dual_mono(pcm, channels):
+    pcm = pcm.astype(np.float32)
+    if channels == 2:
+        pcm = pcm[:len(pcm) - (len(pcm) % 2)]
+        stereo = pcm.reshape(-1, 2)
+        mono = stereo.mean(axis=1)
+    else:
+        mono = pcm
+    mono = np.clip(mono, -32768, 32767).astype(np.int16)
+    return np.column_stack((mono, mono)).flatten()
+
+def rescale(value, in_min=0.01, in_max=1.0, out_min=0, out_max=255):
+    return int((value - in_min) / (in_max - in_min) * (out_max - out_min) + out_min)
+
+
 class Worker(QObject):
     finished = pyqtSignal()
     progress = pyqtSignal(int)
@@ -349,11 +394,56 @@ class Worker(QObject):
         self.currentfilelen = 0
         self.currentconvertlen = 0
 
+    def detect_max_freq_response(self, fft_result, freq, noise_threshold_db):
+        """
+        Detect the maximum frequency with significant energy above the noise threshold.
+        Uses a more sophisticated method to find actual signal rolloff.
+
+        Args:
+            fft_result: FFT result (complex array)
+            freq: Frequency bins corresponding to FFT result
+
+        Returns:
+            Maximum frequency in Hz with significant energy
+        """
+        # Convert to magnitude (linear scale)
+        magnitude = np.abs(fft_result)
+
+        # Convert to dB scale
+        # Add small epsilon to avoid log(0)
+        magnitude_db = 20 * np.log10(magnitude + 1e-10)
+
+        # Find the peak magnitude (reference level)
+        peak_db = np.max(magnitude_db)
+
+        # Calculate relative threshold (dB below peak)
+        # Looking for frequencies that are within a certain range of the peak
+        relative_threshold = peak_db + noise_threshold_db
+
+        # Find frequencies above the relative threshold
+        above_threshold = magnitude_db > relative_threshold
+
+        if np.any(above_threshold):
+            # Find the highest frequency above threshold
+            max_freq_idx = np.where(above_threshold)[0][-1]
+            max_freq = freq[max_freq_idx]
+
+            # Optional: Add some debug info
+            if hasattr(self, 'debug_mode') and self.debug_mode:
+                print(f"Peak: {peak_db:.1f} dB, Threshold: {relative_threshold:.1f} dB")
+
+            return int(max_freq)
+        else:
+            return 0
+
     def do_work(self):
         self.processingstatus.emit("importing pyogg and libopus")
         os.environ["pyogg_win_libopus_version"] = self.opusettings.getopusstrversion()
+        #if self.opusettings.getopusstrversion() == "old":
+        #    os.environ["pyogg_win_libopus_version"] = "custom"
+        #    os.environ["pyogg_win_libopus_custom_path"] = os.path.join(os.getcwd(), "libopus11.dll")
 
-        importlib.reload(pyogg)
+        importlib.reload(pyogg.opus)
         self.processingstatus.emit("creating encoder")
         opusencoder = pyogg.OpusBufferedEncoder()
         self.processingstatus.emit("configuring encoder")
@@ -397,10 +487,10 @@ class Worker(QObject):
                     counter = 0
                     cleanpath = output_filename.split(".")
 
-                    while os.path.exists(f"{cleanpath[0]}_{counter:03d}.{cleanpath[1]}"):
+                    while os.path.exists(f"{cleanpath[0]}_{counter:03d}.{cleanpath[-1]}"):
                         counter += 1
 
-                    output_filename = f"{cleanpath[0]}_{counter:03d}.{cleanpath[1]}"
+                    output_filename = f"{cleanpath[0]}_{counter:03d}.{cleanpath[-1]}"
                 elif self.appconfig.ifilexist == 1:
                     os.remove(tempwavpath)
                     continue
@@ -412,6 +502,7 @@ class Worker(QObject):
             else:
                 writer = None
             self.processingstatus.emit(f"converting {filename} to opus")
+            avgbitrate = []
             while True:
                 # Get data from the wav file
                 pcm = np.frombuffer(wave_read.readframes(1024), dtype=np.int16)
@@ -420,12 +511,110 @@ class Worker(QObject):
                 if len(pcm) == 0:
                     break
 
-                gainedpcm = pcm.copy() * self.opusettings.gain
+                if self.opusettings.ai:
+                    mono_data = np.mean(pcm.reshape(-1, 2), axis=1)
+
+                    fft_result = np.fft.rfft(mono_data)
+                    freq = np.fft.rfftfreq(len(mono_data), 1 / self.opusettings.samplesrates)
+
+                    # Detect max frequency response
+                    max_freq = self.detect_max_freq_response(fft_result, freq, self.opusettings.absthreshold)
+
+                    if self.opusettings.dabs:
+                        bitrate = rescale(min(max_freq, 20000), 0, 20000, 2500, self.opusettings.bitrate * 1000)
+                    else:
+                        if self.opusettings.oldcodebook:
+                            if max_freq > 18000:
+                                bitrate = self.opusettings.bitrate
+                            elif 14000 < max_freq <= 18000:
+                                bitrate = self.opusettings.bitrate / 2
+                            elif 10000 < max_freq <= 14000:
+                                bitrate = self.opusettings.bitrate / 3
+                            elif 6000 < max_freq <= 10000:
+                                bitrate = self.opusettings.bitrate / 4
+                            elif 4000 < max_freq <= 6000:
+                                bitrate = self.opusettings.bitrate / 5
+                            elif 2000 < max_freq <= 4000:
+                                bitrate = self.opusettings.bitrate / 6
+                            else:
+                                bitrate = self.opusettings.bitrate / 7
+                        else:
+                            if max_freq > 19000:
+                                bitrate = self.opusettings.bitrate
+                            elif 18000 < max_freq <= 19000:
+                                bitrate = self.opusettings.bitrate / 1.25
+                            elif 17000 < max_freq <= 18000:
+                                bitrate = self.opusettings.bitrate / 1.5
+                            elif 16000 < max_freq <= 17000:
+                                bitrate = self.opusettings.bitrate / 1.75
+                            elif 15000 < max_freq <= 16000:
+                                bitrate = self.opusettings.bitrate / 2
+                            elif 14000 < max_freq <= 15000:
+                                bitrate = self.opusettings.bitrate / 2.25
+                            elif 13000 < max_freq <= 14000:
+                                bitrate = self.opusettings.bitrate / 2.5
+                            elif 12000 < max_freq <= 13000:
+                                bitrate = self.opusettings.bitrate / 2.75
+                            elif 11000 < max_freq <= 12000:
+                                bitrate = self.opusettings.bitrate / 3.25
+                            elif 10000 < max_freq <= 11000:
+                                bitrate = self.opusettings.bitrate / 3.5
+                            elif 9000 < max_freq <= 10000:
+                                bitrate = self.opusettings.bitrate / 3.75
+                            elif 8000 < max_freq <= 9000:
+                                bitrate = self.opusettings.bitrate / 4
+                            elif 7000 < max_freq <= 8000:
+                                bitrate = self.opusettings.bitrate / 4.5
+                            elif 6000 < max_freq <= 7000:
+                                bitrate = self.opusettings.bitrate / 5
+                            elif 5000 < max_freq <= 6000:
+                                bitrate = self.opusettings.bitrate / 5.5
+                            elif 4000 < max_freq <= 5000:
+                                bitrate = self.opusettings.bitrate / 6
+                            elif 3000 < max_freq <= 4000:
+                                bitrate = self.opusettings.bitrate / 6.5
+                            elif 2000 < max_freq <= 3000:
+                                bitrate = self.opusettings.bitrate / 7
+                            elif 1000 < max_freq <= 2000:
+                                bitrate = self.opusettings.bitrate / 7.5
+                            else:
+                                bitrate = self.opusettings.bitrate / 8
+
+                        bitrate = int(max(2.5, bitrate) * 1000)
+
+                    if self.opusettings.automono and wave_read.getnchannels() == 2:
+                        left_channel = pcm[::2]
+                        right_channel = pcm[1::2]
+
+                        mid = (left_channel + right_channel) / 2
+                        side = (left_channel - right_channel) / 2
+
+                        try:
+                            loudnessside = 20 * math.log10(np.sqrt(np.mean(np.square(side.astype(np.float64)))) / 32768)
+                        except:
+                            loudnessside = 0
+
+                        if loudnessside < self.opusettings.amthreshold:
+                            # convert to mono from gainedpcm
+                            output = make_dual_mono(pcm, wave_read.getnchannels())
+                            bitrate = bitrate / 2
+                        else:
+                            output = pcm
+                    else:
+                        output = pcm
+
+                    if self.opusettings.absavg:
+                        avgbitrate.append(int(bitrate))
+                        bitrate = int(sum(avgbitrate) / len(avgbitrate))
+
+                    writer._encoder.set_bitrates(bitrate)
+                else:
+                    output = pcm
 
                 # Encode the PCM data
-                writer.write(memoryview(bytearray(gainedpcm)))
+                writer.write(memoryview(bytearray(output)))
 
-                self.currentconvertlen += len(gainedpcm)
+                self.currentconvertlen += len(output)
 
                 self.progress.emit((self.currentconvertlen) * 100 // self.currentfilelen)  # Emit progress value
             writer.close()
@@ -446,7 +635,7 @@ class Worker(QObject):
         temp_wav_file = os.path.join(temp_dir, filename + ".wav")
 
         # Run ffmpeg to extract audio from the video file
-        subprocess.run(["ffmpeg", "-i", file, "-vn", "-acodec", "pcm_s16le", "-ar", "48000", temp_wav_file], check=True)
+        subprocess.run(["ffmpeg", "-i", file, "-vn", "-acodec", "pcm_s16le", "-ar", str(self.opusettings.samplesrates), "-ac", str(self.opusettings.channel), temp_wav_file], check=True)
 
         # Return the path to the temporary WAV file
         return temp_wav_file
@@ -476,7 +665,7 @@ class MainWindow(QMainWindow):
         for file_name in file_names_without_extension:
             self.ui.PresetsIn.addItem(file_name)
 
-        self.setFixedSize(1010, 670)
+        self.setFixedSize(1010, 750)
 
         self.setAcceptDrops(True)
         self.ui.FileTable.setAcceptDrops(True)
@@ -545,6 +734,9 @@ class MainWindow(QMainWindow):
         self.ui.CompIn.valueChanged.connect(self.setcompression)
         # Opus samples rates input
         self.ui.SampRateIn.valueChanged.connect(self.setsamprate)
+        self.ui.GainIn.valueChanged.connect(self.setGain)
+        self.ui.ABSTIn.valueChanged.connect(self.setABSThreshold)
+        self.ui.AMTIn.valueChanged.connect(self.setAMThreshold)
         # Opus Output File Extension select
         self.ui.UseOpusfile.clicked.connect(self.checkfileextension)
         self.ui.UseOGGfile.clicked.connect(self.checkfileextension)
@@ -553,10 +745,14 @@ class MainWindow(QMainWindow):
         #self.ui.UseMKAfile.clicked.connect(self.checkfileextension)
         #self.ui.UseCAFfile.clicked.connect(self.checkfileextension)
         # Opus Features select
-        #self.ui.EnaAI.clicked.connect(self.setFeatures)
+        self.ui.EnaABS.clicked.connect(self.setFeatures)
         self.ui.EnaPred.clicked.connect(self.setFeatures)
         self.ui.EnaSPI.clicked.connect(self.setFeatures)
         self.ui.EnaDTX.clicked.connect(self.setFeatures)
+        self.ui.EnaAM.clicked.connect(self.setFeatures)
+        self.ui.EnaDABS.clicked.connect(self.setFeatures)
+        self.ui.EnaABSAvg.clicked.connect(self.setFeatures)
+        self.ui.EnaABSOCB.clicked.connect(self.setFeatures)
 
         self.ui.StartConvButton.clicked.connect(self.startconvert)
 
@@ -737,8 +933,21 @@ class MainWindow(QMainWindow):
     def setsamprate(self, value):
         self.opusconfig.samplesrates = value
 
+    def setGain(self, value):
+        self.opusconfig.gain = value
+
+    def setABSThreshold(self, value):
+        self.opusconfig.absthreshold = value
+
+    def setAMThreshold(self, value):
+        self.opusconfig.amthreshold = value
+
     def setFeatures(self):
-        self.opusconfig.ai = self.ui.EnaAI.isChecked()
+        self.opusconfig.oldcodebook = self.ui.EnaABSOCB.isChecked()
+        self.opusconfig.absavg = self.ui.EnaABSAvg.isChecked()
+        self.opusconfig.dabs = self.ui.EnaDABS.isChecked()
+        self.opusconfig.automono = self.ui.EnaAM.isChecked()
+        self.opusconfig.ai = self.ui.EnaABS.isChecked()
         self.opusconfig.prediction = self.ui.EnaPred.isChecked()
         self.opusconfig.phaseinvert = self.ui.EnaSPI.isChecked()
         self.opusconfig.DTX = self.ui.EnaDTX.isChecked()

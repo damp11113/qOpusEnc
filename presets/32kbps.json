@@ -1,0 +1,17 @@
+{
+    "version": 1,
+    "framesizes": 120,
+    "app": "restricted_lowdelay",
+    "bitmode": "CVBR",
+    "bitrates": 32.0,
+    "bandwidth": "fullband",
+    "channels": 2,
+    "packloss": 0,
+    "compressions": 0,
+    "samplesrates": 48000,
+    "ai": false,
+    "prediction": false,
+    "phaseinvert": false,
+    "DTX": false,
+    "gain": 1
+}
